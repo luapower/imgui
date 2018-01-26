@@ -1,5 +1,5 @@
 local nw = require'nw'
-local imgui_nw_cairo = require'imgui_nw_cairo'
+local imgui = require'imgui_nw_cairo'
 local fs = require'fs'
 local glue = require'glue'
 
@@ -11,10 +11,10 @@ local x, y, w, h = app:active_display():desktop_rect()
 local win = app:window{x = x, y = y, w = w / 2, h = h, title = 'Demo',
 	visible = false, autoquit = true}
 
-imgui_nw_cairo:bind_window(win)
+imgui:bind(win)
 
 function imgui_demo_app(imgui)
-	local app = require'imgui_nw_cairo_demo_app'
+	local app = require'imgui_demo_app'
 	app(imgui)
 end
 
@@ -48,29 +48,36 @@ local function module_filepath(mod)
 	    or package.searchpath(mod, package.cpath)
 end
 
-local function reload_module_func(mod)
+local function reload_module(mod)
+	local mod0 = package.loaded[mod]
+	package.loaded[mod] = nil
+	local ok, err = xpcall(require, debug.traceback, mod)
+	if not ok then
+		package.loaded[mod] = mod0
+		show_error(err)
+	end
+	return ok, err
+end
+
+local function reload_module_func(mod, reload)
 	local path = assert(module_filepath(mod))
-	local last_mtime = 0
+	local last_mtime = fs.attr(path, 'mtime')
 	return function()
 		local mtime = fs.attr(path, 'mtime')
 		if mtime <= last_mtime then return end
 		last_mtime = mtime
-		local mod0 = package.loaded[mod]
-		package.loaded[mod] = nil
-		local ok, err = xpcall(require, debug.traceback, mod)
-		if not ok then
-			package.loaded[mod] = mod0
-			show_error(err)
+		local ok = reload_module(mod)
+		if ok and reload then
+			reload()
 		end
 		return ok
 	end
 end
 
-local reload_imgui = reload_module_func'imgui'
-local reload_app = reload_module_func'imgui_nw_cairo_demo_app'
+local reload_app = reload_module_func'imgui_demo_app'
 
 app:runevery(0.1, function()
-	if reload_imgui() or reload_app() then
+	if reload_app() then
 		win:invalidate()
 	end
 end)

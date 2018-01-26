@@ -2,6 +2,16 @@
 --Immediate Mode GUI toolkit.
 --Written by Cosmin Apreutesei. Public Domain.
 
+--Using this library requires integrating it with two APIs: a windowing
+--API to hook in mouse, keyboard and repaint events, and a graphics API
+--to draw widgets on. The windowing API must create an imgui object with
+--imgui:new() for each window that it creates and must implement all
+--self:_backend*() calls on that object for that window. Then it must call
+--imgui:_render_frame(graphics_api) on the window's repaint event passing in
+--the graphics API set up to draw on that window's client area. The graphics
+--API needs to implement all self.cr:*() calls which map to the cairo API.
+--Look at imgui_nw_cairo.lua for an example of a complete integration.
+
 if not ... then require'imgui_demo'; return end
 
 local ffi = require'ffi' --TODO: remove this
@@ -15,25 +25,64 @@ local imgui = {
 	tripleclicks = false,
 }
 
---utils ----------------------------------------------------------------------
+--ever-growing vararg stacks -------------------------------------------------
+
+--an ever-growing stack doesn't set its slots to nil on remove to prevent
+--garbage-collecting the slots. on top of that, a vararg stack allows adding
+--and removing vararg elements without creating additional tables.
 
 local function top(t)
-	return t[#t]
-end
-
-local function pop(t)
-	return table.remove(t)
+	return t[t.n]
 end
 
 local function push(t, v)
-	table.insert(t, v)
+	local n = t.n or 0
+	t[n + 1] = v
+	t.n = n + 1
+end
+
+local function pop(t)
+	local n = t.n
+	if n == 0 then return end
+	local v = t[n]
+	t[n] = false
+	t.n = n - 1
+	return v
+end
+
+local function popn(t, n)
+	local len = t.n
+	n = math.min(n, len)
+	for i=1,n do
+		t[len-i+1] = false
+	end
+	t.n = len - n
+end
+
+local function topvar(t)
+	local n = top(t)
+	if not n then return end
+	return unpack(t, t.n - n, t.n - 1)
+end
+
+local function pushvar(t, ...)
+	local n = select('#', ...)
+	for i=1,n do
+		local v = select(i, ...)
+		push(t, v)
+	end
+	push(t, n)
+end
+
+local function popvar(t)
+	popn(t, pop(t))
 end
 
 --themed graphics ------------------------------------------------------------
 
 imgui.themes = {}
 
-imgui.default = {} --theme defaults
+imgui.default = {} --theme defaults, declared inline
 
 imgui.themes.dark = glue.inherit({
 	window_bg     = '#000000',
@@ -75,16 +124,19 @@ imgui.default_theme = imgui.themes.dark
 
 --themed color setting
 
-local function parse_color(c)
+local function parse_color(c, g, b, a)
 	if type(c) == 'string' then
 		return color.string_to_rgba(c)
 	elseif type(c) == 'table' then
-		return unpack(c)
+		local r, g, b, a = unpack(c)
+		return r, g, b, a or 1
+	else
+		return c, g, b, a or 1
 	end
 end
 
-function imgui:setcolor(color)
-	self.cr:rgba(parse_color(self.theme[color] or color))
+function imgui:setcolor(color, g, b, a)
+	self.cr:rgba(parse_color(self.theme[color] or color, g, b, a))
 end
 
 --themed font setting
@@ -94,51 +146,39 @@ local function str(s)
 	s = glue.trim(s)
 	return s ~= '' and s or nil
 end
+local function parse_font(font, default_font)
+	local name, size, weight, slant =
+		font:match'([^,]*),?([^,]*),?([^,]*),?([^,]*)'
+	local t = {}
+	t.name = assert(str(name) or default_font:match'^(.-),')
+	t.size = tonumber(str(size)) or default_font:match',(.*)$'
+	t.weight = str(weight) or 'normal'
+	t.slant = str(slant) or 'normal'
+	return t
+end
 
 local fonts = setmetatable({}, {__mode = 'kv'})
 
---TODO: use cairo.ft_face() with our own fonts instead of platform fonts!
-local default_font =
-	ffi.os == 'Windows' and 'MS Sans Serif,8'
-	or ffi.os == 'OSX' and 'Droid Sans,12'
-	or ffi.os == 'Linux' and 'Droid Sans,14'
-
-local default_font_face = default_font:match'^(.-),'
-local default_font_size = default_font:match',(.*)$'
-
-imgui.default.default_font = default_font
-
-local function parse_font(font)
-	if fonts[font] then
-		return fonts[font]
+local function load_font(font, default_font)
+	font = font or default_font
+	local t = fonts[font]
+	if not t then
+		if type(font) == 'string' then
+			t = parse_font(font, default_font)
+		elseif type(font) == 'number' then
+			t = parse_font(default_font, default_font)
+			t.size = font
+		end
+		fonts[font] = t
 	end
-	if type(font) == 'string' then
-		local face, size, weight, slant =
-			font:match'([^,]*),?([^,]*),?([^,]*),?([^,]*)'
-		local font_t = {
-			face = str(face) or default_font_face,
-			size = tonumber(str(size)) or default_font_size,
-			weight = str(weight) or 'normal',
-			slant = str(slant) or 'normal',
-		}
-		fonts[font] = font_t --memoize for speed
-		font = font_t
-	elseif type(font) == 'number' then
-		local font_t = {
-			face = default_font_face,
-			size = font,
-			weight = 'normal',
-			slant = 'normal',
-		}
-		fonts[font] = font_t --memoize for speed
-		font = font_t
-	end
-	return font
+	return t
 end
 
+imgui.default.default_font = 'Open Sans,14'
+
 function imgui:setfont(font)
-	font = parse_font(self.theme[font] or font or self.theme.default_font)
-	self.cr:font_face(font.face, font.slant, font.weight)
+	font = load_font(self.theme[font] or font, self.theme.default_font)
+	self:_backend_load_font(font.name, font.weight, font.slant)
 	self.cr:font_size(font.size)
 	font.extents = font.extents or self.cr:font_extents()
 	return font
@@ -225,9 +265,6 @@ function imgui:text_extents(s, font, line_h)
 end
 
 local function draw_text(cr, x, y, s, align, line_h) --multi-line text
-	if ffi.os == 'OSX' then --TOOD: remove this hack
-		y = y + 1
-	end
 	for s in glue.lines(s) do
 		if align == 'right' then
 			local extents = cr:text_extents(s)
@@ -446,11 +483,13 @@ end
 --mouse & keyboard -----------------------------------------------------------
 
 function imgui:mousepos()
+	if not self.mousex then return end
 	return self.cr:device_to_user(self.mousex, self.mousey)
 end
 
 function imgui:hotbox(x, y, w, h)
 	local mx, my = self:mousepos()
+	if not mx then return false end
 	return
 		box2d.hit(mx, my, x, y, w, h)
 		and self.cr:in_clip(mx, my)
@@ -458,7 +497,7 @@ function imgui:hotbox(x, y, w, h)
 end
 
 function imgui:keypressed(keyname)
-	return self:_backend_keypressed(keyname)
+	return self:_backend_key_state(keyname)
 end
 
 --animation ------------------------------------------------------------------
@@ -488,13 +527,14 @@ function stopwatch:progress()
 	end
 end
 
---window controller ----------------------------------------------------------
+--imgui controller -----------------------------------------------------------
 
 function imgui:new()
 
 	--NOTE: this is shallow copy, so themes and default tables are shared
 	--between all instances.
 	local inst = glue.update({}, self)
+	inst.new = false --prevent instantiating from the instance
 
 	--statically inherit imgui extensions loaded at runtime
 	local self = setmetatable(inst, {__index = function(t, k)
@@ -506,20 +546,14 @@ function imgui:new()
 	--one-shot init trigger: set to true only on the first frame
 	self.init = true
 
-	--mouse state: to be set on the first frame and on mouse events
-	self.mousex = nil
-	self.mousey = nil
-	self.lbutton = false
-	self.rbutton = false
-
-	--mouse one-shot state, set if mouse state changed between frames
+	--mouse one-shot state, set when mouse state changed between frames
 	self.clicked = false       --left mouse button clicked (one-shot)
 	self.rightclick = false    --right mouse button clicked (one-shot)
 	self.doubleclicked = false --left mouse button double-clicked (one-shot)
 	self.tripleclicked = false --left mouse button triple-clicked (one-shot)
 	self.wheel_delta = 0       --mouse wheel number of scroll pages (one-shot)
 
-	--keyboard state: to be set on all keyboard events by integrators
+	--keyboard state: to be set on keyboard events
 	self.key = nil
 	self.char = nil
 	self.shift = false
@@ -534,13 +568,43 @@ function imgui:new()
 	--animation state
 	self.stopwatches = {} --{[stopwatch] = stopwatch_object}
 
+	--event stream
+	self.events = {}
+
 	return self
 end
 
-function imgui:_render_frame_once()
+function imgui:_backend_mousemove(x, y)
+	self.mousex = x
+	self.mousey = y
+end
+
+function imgui:_backend_mouseenter(x, y)
+
+end
+
+function imgui:_backend_mouseleave()
+
+end
+
+function imgui:_backend_event(...)
+	local clock = self:_backend_clock()
+	pushvar(self.events, clock, ...)
+end
+
+function imgui:_consume_event(clock, event, ...)
+	if not clock then return end
+	self.clock = clock
+	self[event](self, ...)
+	popvar(self.events)
+end
+
+function imgui:_render_pass()
 
 	--reset the theme
 	self.theme = self.default_theme
+
+	self.cw, self.ch = self:_backend_client_size()
 
 	self:_init_frame_layout()
 
@@ -552,9 +616,6 @@ function imgui:_render_frame_once()
 	self:setcolor'window_bg'
 	self.cr:paint()
 
-	--set the clock
-	self.clock = self:_backend_clock()
-
 	--remove any finished stopwatches
 	for t in pairs(self.stopwatches) do
 		if t:finished() then
@@ -562,11 +623,20 @@ function imgui:_render_frame_once()
 		end
 	end
 
+	--stuff to do only on first frame
+	if self.init then
+		imgui.mousex,
+		imgui.mousey,
+		imgui.lbutton,
+		imgui.rbutton =
+			self:_backend_mouse_state()
+	end
+
 	--render the app frame
 	self:_backend_render_frame()
 
 	--magnifier glass: so useful it's enabled by default
-	if self.show_magnifier and self:keypressed'ctrl' then
+	if self.show_magnifier and self:keypressed'ctrl' and self.mousex then
 		self.cr:identity_matrix()
 		self:magnifier{
 			id = 'mag',
@@ -608,17 +678,18 @@ function imgui:_render_frame_once()
 
 end
 
-function imgui:_render_frame_app() end --stub: user app code event
-
 function imgui:_render_frame() --to be called on window's repaint event
 	repeat
-		self._valid = true
-		self:_render_frame_once()
-	until self._valid
+		self:_consume_event(topvar(self.events))
+		repeat
+			self._frame_valid = true
+			self:_render_pass()
+		until self._frame_valid
+	until not top(self.events)
 end
 
 function imgui:invalidate()
-	self._valid = false
+	self._frame_valid = false
 end
 
 --label widget ---------------------------------------------------------------

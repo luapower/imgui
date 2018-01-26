@@ -1,5 +1,4 @@
 local imgui = require'imgui'
-local cairo = require'cairo'
 local ffi = require'ffi'
 local bitmap = require'bitmap'
 

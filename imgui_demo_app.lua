@@ -6,9 +6,14 @@ return function(self)
 
 	cr:translate(0.5, 0.5)
 
-	cr:font_face('Fixedsys')
-	cr:font_size(12)
-	cr:rgb(1, 1, 1)
+	self.default.default_font =
+'calligraffitti,26,regular'
+--'DejaVuSans,13'
+
+
+	--cr:font_face('Fixedsys')
+	--cr:font_size(12)
+	--cr:rgb(1, 1, 1)
 
 	--[[
 	self:begin_content_box'h'
