@@ -4,12 +4,15 @@ if not ... then require'imgui_demo'; return end
 return function(self)
 	local cr = self.cr
 
+	--self.show_magnifier = false
+
+	self:setmargin(5, 5)
+
 	cr:translate(0.5, 0.5)
 
-	self.default.default_font =
-'calligraffitti,26,regular'
---'DejaVuSans,13'
-
+	--self.default.default_font =
+--'akronim,36'
+--'DejaVu Sans,14'
 
 	--cr:font_face('Fixedsys')
 	--cr:font_size(12)
@@ -27,22 +30,41 @@ return function(self)
 	self:end_content_box()
 	]]
 
-	self.halign = 'r'
-	self.flow = 'h'
+	self:setflow'h'
 	self:box'20%'
 	self:box'300'
-	self.flow = 'v'
+	self:setflow'v'
 	self:box(nil, '20%')
-	self:box(nil, '300')
+
+	self:begin_box(nil, 500, 'h', 10, 20)
+
+		self:box(100)
+		self:button{text = 'Hey', w = 100}
+
+		self:begin_layer(0, 0, 200, 200)
+
+			self:button{text = 'Hey11'}
+
+		self:end_layer()
+
+		self:box(100)
+		self:setflow'v'
+		self:box(nil, 100)
+		self:button{text = 'Hey2', h = 100}
+		self:box()
+
+	self:end_box()
+
 	self:label('hello')
 	self.halign = 'c'
 	self:label('hello again')
 	self:label('and again')
 	self.halign = 'l'
 	self:label('and again')
-	--self:spacer(nil, 100)
-	self:button('Hi I\'m a button!')
-	--self:box()
+	self:button{id='btn', text='Hi I\'m a button!', h = 26}
+	self:box(nil, 100)
+	self:spacer(nil, 100)
+	self:box()
 
 	--[[
 	self.flow = 'h'

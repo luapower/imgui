@@ -37,7 +37,7 @@ function win:imgui_render()
 			cr:move_to(x, y + 16)
 		end
 		cr:restore()
-		--print(err)
+		print(err)
 	end
 end
 

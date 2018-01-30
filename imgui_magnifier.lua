@@ -4,7 +4,7 @@ local bitmap = require'bitmap'
 
 function imgui:magnifier(t)
 	local id = assert(t.id, 'id missing')
-	local x, y, w, h = self:getbox(t)
+	local x, y, w, h = t.x, t.y, t.w, t.h
 	local zoom_level = math.max(1, math.floor(t.zoom_level or 2))
 
 	--by default, capture the box in the center of the magnifier

@@ -52,8 +52,8 @@ function imgui:button(t)
 			t.text, t.w, t.h, t.selected, t.enabled, t.cut
 	end
 	]]
-	local id = t.id
-	local x, y, w, h = self:content_box(t.w, t.h)
+	local id = t.id or t.text
+	local x, y, w, h = self:flowbox(t.w, t.h)
 	local text = t.text or id
 	local cut = t.cut
 	local selected = t.selected
@@ -81,17 +81,20 @@ function imgui:button(t)
 		end
 	end
 
-	local color_state = (selected or self.active == id and hot and down) and 'selected'
-								or ((not self.active or self.active == id) and hot and 'hot')
-								or enabled and (t.default and 'default' or 'normal')
-								or 'disabled'
+	local color_state =
+		(selected or self.active == id and hot and down) and 'selected'
+		or ((not self.active or self.active == id) and hot and 'hot')
+		or enabled and (t.default and 'default' or 'normal')
+		or 'disabled'
 	local bg_color = color_state..'_bg'
 	local fg_color = color_state..'_fg'
 
 	--drawing
 	button_path(self.cr, x + 0.5, y + 0.5, w - 1, h - 1, cut)
 	self:fillstroke(bg_color, 'normal_border', 1)
-	self:textbox(x, y, w, h, text, font, fg_color, 'center', 'center')
+	self:textbox(x + 2, y, w - 4, h, text, font, fg_color, 'center', 'center')
+
+	self:add_flowbox(x, y, w, h)
 
 	return (t.immediate and self.active == id and hot and down) or clicked
 end
