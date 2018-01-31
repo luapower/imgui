@@ -41,16 +41,22 @@ return function(self)
 		self:box(100)
 		self:button{text = 'Hey', w = 100}
 
-		self:begin_layer('layer1')
-
-			self:button{text = 'Hey11', w = -270}
-
+		self:begin_layer('layer1', 1)
+			self:button{text = 'Hey 1', w = -270, h = 300}
+			self:begin_layer('layer2', 2)
+				self:button{text = 'Hey 2', w = -370, h = 200}
+			self:end_layer()
+		self:end_layer()
+		self:begin_layer('layer11', 1.5)
+			self:setflow'v'
+			self:spacer(nil, 150)
+			self:button{text = 'Hey 1.5', w = -370, h = 200}
 		self:end_layer()
 
 		self:box(100)
 		self:setflow'v'
 		self:box(nil, 100)
-		self:button{text = 'Hey2', h = 100}
+		self:button{text = 'Hey again!', h = 100}
 		self:box()
 
 	self:end_box()

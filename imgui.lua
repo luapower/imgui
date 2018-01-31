@@ -31,11 +31,8 @@ local imgui = {
 	tripleclicks = false,
 }
 
---ever-growing vararg stacks -------------------------------------------------
-
---an ever-growing stack doesn't set its slots to nil on remove to prevent
---garbage-collecting the slots. on top of that, a vararg stack allows adding
---and removing vararg elements without creating additional tables.
+--gc-friendly data structures ------------------------------------------------
+--these are tables which don't nil their slots on removal.
 
 local function topindex(t, i)
 	return (t.n or 0) + (i or 0)
@@ -49,6 +46,7 @@ local function push(t, v)
 	local n = t.n or 0
 	t[n + 1] = v or false
 	t.n = n + 1
+	t.capacity = math.max(t.capacity or 0, t.n)
 end
 
 local function pop(t)
@@ -60,10 +58,19 @@ local function pop(t)
 	return v
 end
 
+--same thing for multi-value elements
+
+local function pushn(t, n, ...)
+	for i = 1,n do
+		local v = select(i, ...)
+		push(t, v)
+	end
+end
+
 local function popn(t, n)
 	local len = topindex(t)
 	n = math.min(n, len)
-	for i=1,n do
+	for i = 1,n do
 		t[len - i + 1] = false
 	end
 	t.n = len - n
@@ -73,11 +80,83 @@ local function popall(t)
 	popn(t, topindex(t))
 end
 
-local function settop(t, i, v)
-	local i = topindex(t, i)
-	assert(i <= (t.n or 0))
-	t[i] = v or false
+local function setn(t, ti, n, ...)
+	for i = 1,n do
+		local v = select(i, ...)
+		t[ti + i - 1] = v or false
+	end
 end
+
+local function insertn(t, ti, n, ...)
+	if ti > topindex(t) then
+		return pushn(t, n, ...)
+	end
+	for p = t.n, ti, -1 do --shift n elements from ti to the right
+		t[p+n] = t[p]
+	end
+	t.n = topindex(t, n)
+	t.capacity = math.max(t.capacity or 0, t.n)
+	setn(t, ti, n, ...)
+end
+
+--[[
+--record stack (i.e. stack of fixed-length arrays)
+
+local function reclen(t, n)
+	t.reclen = n
+	t.recnum = 0
+	return t
+end
+
+local function recnum(t)
+	return t.recnum
+end
+
+local function reci(t, ri, i)
+	return (ri - 1) * t.reclen + i
+end
+
+local function rec(t, ri)
+	return unpack(t,  reci(t, ri, 1), reci(t, ri + 1, 0))
+end
+
+local function setrec(t, ri, ...)
+	assert(ri >= 1)
+	assert(ri <= t.reclen)
+	for i=1,t.reclen do
+		local v = select(i, ...)
+		t[reci(t, ri, i)] = v or false
+	end
+end
+
+local function pushrec(t, ...)
+	t.recnum = t.recnum + 1
+	t.capacity = math.max(t.capacity or 0, t.recnum)
+	setrec(t, t.recnum, ...)
+end
+
+local function poprec(t)
+	for i=1,t.reclen do
+		t[reci(t, t.recnum, i)] = false
+	end
+	t.recnum = t.recnum - 1
+end
+
+local function nextrec(t, ri)
+	ri = (ri or 0) + 1
+	return ri, rec(t, ri)
+end
+
+local function recs(t)
+	return nextrec, t
+end
+
+local function toprec(t, ri)
+	return rec(
+end
+]]
+
+--vararg stack (i.e. stack of variable-length arrays)
 
 local function topvar(t)
 	local n = top(t)
@@ -897,44 +976,55 @@ end
 
 function imgui:_init_layers()
 	self.layers = {}
+	self.layer_stack = {}
 	self.hot_layer = false
 	self.current_layer = false
+	self.current_z_order = 0
 end
 
-function imgui:_init_frame_layers() end
+function imgui:_init_frame_layers()
+	self.current_z_order = 0
+end
 function imgui:_done_frame_layers() end
 
 function imgui:_render_layers()
 	assert(self.current_layer == false, 'missing end_layer()')
 
-	for i = 1, topindex(self.layers), 5 do
-		local sr, id, z_order, hit_test_func = unpack(self.layers, i, i + 3)
+	for i = 1, topindex(self.layers), 4 do
+		local sr, id, hit_test_func, z = unpack(self.layers, i, i + 3)
 		self.cr:identity_matrix()
 		self.cr:source(sr)
 		self.cr:paint()
 		self.cr:rgb(0, 0, 0)
 	end
 
-	--hit test layers in reverse paint order to find the new hot one
+	--hit test layers in reverse z_order to find the new hot one
 	local new_hot_layer = false
 	local mx = self.mousex
 	local my = self.mousey
-	for i = topindex(self.layers) - 4, 1, -5 do
-		local sr, id, z_order, hit_test = unpack(self.layers, i, i + 3)
-		if hit_test then --user-provided function
-			if hit_test(self, mx, my) then
-				new_hot_layer = id
-				break
-			end
-		else --test on sr's bbox
-			local x, y, w, h = sr:ink_extents()
-			if box2d.hit(mx, my, x, y, w, h) then
-				new_hot_layer = id
-				break
+	if mx then
+		for i = topindex(self.layers) - 3, 1, -4 do
+			local sr, id, hit_test = unpack(self.layers, i, i + 2)
+			if hit_test then --user-provided function
+				if hit_test(self, mx, my) then
+					new_hot_layer = id
+					break
+				end
+			else --test on sr's bbox
+				local x, y, w, h = sr:ink_extents()
+				if box2d.hit(mx, my, x, y, w, h) then
+					new_hot_layer = id
+					break
+				end
 			end
 		end
 	end
 
+	--free layer surfaces and clear the stack
+	for i = 1, topindex(self.layers), 4 do
+		local sr = self.layers[i]
+		sr:free()
+	end
 	popall(self.layers)
 
 	--check if the active layer has changed, in which case we need
@@ -949,15 +1039,33 @@ function imgui:begin_layer(id, z_order, hit_test_func)
 	self:_save_cr()
 	local sr = self:_backend_layer_surface()
 	local cr = sr:context()
-	pushvar(self.layers, sr, id, z_order, hit_test_func)
 	self:_init_frame_cr(cr)
 	self:_init_frame_layout()
+
+	z_order = z_order or self.current_z_order * 100 + 1
+
+	--insert record into the layers stack at the right index based on z-order
+	local insert_index = topindex(self.layers, 1)
+	for i = 1, topindex(self.layers), 4 do
+		local z = self.layers[i + 3]
+		if z > z_order then
+			insert_index = i
+			break
+		end
+	end
+	insertn(self.layers, insert_index, 4, sr, id, hit_test_func, z_order)
+
+	push(self.layer_stack, self.current_layer)
+	push(self.layer_stack, self.current_z_order)
 	self.current_layer = id
+	self.current_z_order = z_order
 end
 
 function imgui:end_layer()
 	assert(self.current_layer, 'end_layer() without begin_layer()')
-	self.current_layer = top(self.layers, -8) or false
+	self.current_z_order = pop(self.layer_stack)
+	self.current_layer   = pop(self.layer_stack)
+	self.current_z_order = self.current_z_order + 1
 	self:setfont(nil)
 	self.cr:free()
 	self:_restore_cr()
