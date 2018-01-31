@@ -53,6 +53,7 @@ function imgui:button(t)
 	end
 	]]
 	local id = t.id or t.text
+	self.id = id
 	local x, y, w, h = self:flowbox(t.w, t.h)
 	local text = t.text or id
 	local cut = t.cut
@@ -95,6 +96,7 @@ function imgui:button(t)
 	self:textbox(x + 2, y, w - 4, h, text, font, fg_color, 'center', 'center')
 
 	self:add_flowbox(x, y, w, h)
+	self.id = false
 
 	return (t.immediate and self.active == id and hot and down) or clicked
 end

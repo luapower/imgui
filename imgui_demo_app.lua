@@ -41,9 +41,9 @@ return function(self)
 		self:box(100)
 		self:button{text = 'Hey', w = 100}
 
-		self:begin_layer(0, 0, 200, 200)
+		self:begin_layer('layer1')
 
-			self:button{text = 'Hey11'}
+			self:button{text = 'Hey11', w = -270}
 
 		self:end_layer()
 
@@ -55,6 +55,7 @@ return function(self)
 
 	self:end_box()
 
+	self.halign = 'r'
 	self:label('hello')
 	self.halign = 'c'
 	self:label('hello again')

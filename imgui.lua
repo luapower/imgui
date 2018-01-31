@@ -7,14 +7,14 @@
 --to draw widgets on. The windowing API must create an imgui object with
 --imgui:new() for each window that it creates and must implement all
 --self:_backend*() calls on that object for that window. Then it must call
---imgui:_render_frame(graphics_api) on the window's repaint event passing in
---the graphics API set up to draw on that window's client area. The graphics
---API needs to implement all self.cr:*() calls which map to the cairo API.
+--imgui:_backend_repaint(graphics_api) on the window's repaint event passing
+--in the graphics API set up to draw on that window's client area. The
+--graphics API needs to implement all self.cr:*() calls which currently map
+--to the cairo API.
 --Look at imgui_nw_cairo.lua for an example of a complete integration.
 
 if not ... then require'imgui_demo'; return end
 
-local ffi = require'ffi' --TODO: remove this
 local box2d = require'box2d'
 local color = require'color'
 local glue = require'glue'
@@ -37,18 +37,22 @@ local imgui = {
 --garbage-collecting the slots. on top of that, a vararg stack allows adding
 --and removing vararg elements without creating additional tables.
 
-local function top(t)
-	return t[t.n]
+local function topindex(t, i)
+	return (t.n or 0) + (i or 0)
+end
+
+local function top(t, i)
+	return t[topindex(t, i)]
 end
 
 local function push(t, v)
 	local n = t.n or 0
-	t[n + 1] = v
+	t[n + 1] = v or false
 	t.n = n + 1
 end
 
 local function pop(t)
-	local n = t.n
+	local n = t.n or 0
 	if n == 0 then return end
 	local v = t[n]
 	t[n] = false
@@ -57,12 +61,22 @@ local function pop(t)
 end
 
 local function popn(t, n)
-	local len = t.n
+	local len = topindex(t)
 	n = math.min(n, len)
 	for i=1,n do
 		t[len - i + 1] = false
 	end
 	t.n = len - n
+end
+
+local function popall(t)
+	popn(t, topindex(t))
+end
+
+local function settop(t, i, v)
+	local i = topindex(t, i)
+	assert(i <= (t.n or 0))
+	t[i] = v or false
 end
 
 local function topvar(t)
@@ -90,13 +104,14 @@ local function popvar(t)
 end
 
 local function set_topvar(t, ...)
-	local n = top(t)
-	if not n then return end
-	local arg = 1
-	for i = t.n - n, t.n - 1 do
-		t[i] = select(arg, ...)
-		arg = arg + 1
+	local n0 = top(t)
+	if not n0 then return end
+	local i0 = t.n - n0
+	local n1 = select('#', ...)
+	for i = 1, n1 do
+		t[i0 + i - 1] = select(i, ...) or false
 	end
+	t.n = t.n + n1 - n0
 end
 
 --imgui controller -----------------------------------------------------------
@@ -130,81 +145,38 @@ function imgui:new()
 		return v
 	end})
 
-	--one-shot init trigger: set to true only on the first frame
-	self.init = true
-
-	--mouse one-shot state, set when mouse state changed between frames
-	self.clicked = false       --left mouse button clicked (one-shot)
-	self.rightclick = false    --right mouse button clicked (one-shot)
-	self.doubleclicked = false --left mouse button double-clicked (one-shot)
-	self.tripleclicked = false --left mouse button triple-clicked (one-shot)
-	self.wheel_delta = 0       --mouse wheel number of scroll pages (one-shot)
-
-	--keyboard state: to be set on keyboard events
-	self.key = false
-	self.char = false
-	self.shift = false
-	self.ctrl = false
-	self.alt = false
+	self.init = true --one-shot init trigger, kept until the first frame ends
+	self:_init_cr()
+	self:_init_theme()
+	self:_init_layout()
+	self:_init_layers()
+	self:_init_animation()
+	self:_init_input()
 
 	--widget state
 	self.active = false   --has mouse focus
 	self.focused = false  --has keyboard focus
 	self.ui = {}          --state to be used by the active control
 
-	--animation state
-	self.stopwatches = {} --{[stopwatch] = stopwatch_object}
-
 	--event stream
 	self.events = {}
-
-	--layout state
-	self.layout_stack = {}
-	self.ca_stack = {}
-	self.bbox_stack = {}
-	self.layer_stack = {}
-	self.layers = {}
 
 	self._fps = self:_fps_function()
 
 	return self
 end
 
-function imgui:_render_pass(cr)
+function imgui:_render_frame(cr)
 
-	self.cr = cr
-	self.theme = self.default_theme
-
-	--init the layout/graphic context
-	local cw, ch = self:_backend_client_size()
-	self.window_cw = cw
-	self.window_ch = ch
-	self:_init_cr()
-
-	--clear the background
-	self:setcolor'window_bg'
-	self.cr:paint()
-
-	--remove any finished stopwatches
-	for t in pairs(self.stopwatches) do
-		if t:finished() then
-			self.stopwatches[t] = nil
-		end
-	end
-
-	--stuff to do only on first frame
-	if self.init then
-		imgui.mousex,
-		imgui.mousey,
-		imgui.lbutton,
-		imgui.rbutton =
-			self:_backend_mouse_state()
-	end
+	self:_init_frame_cr(cr)
+	self:_init_frame_theme()
+	self:_init_frame_layout()
+	self:_init_frame_input()
+	self:_init_frame_animation()
+	self:_init_frame_layers()
 
 	self:_backend_render_frame() --user code
-
 	self:_render_layers()
-	self:_free_layers()
 
 	--magnifier glass: so useful it's enabled by default
 	if self.show_magnifier and self:keypressed'ctrl' and self.mousex then
@@ -218,9 +190,6 @@ function imgui:_render_pass(cr)
 			zoom_level = 4,
 		}
 	end
-
-	--release the last loaded font
-	self:_backend_load_font(nil)
 
 	if self.continuous_rendering then
 		if self.title then
@@ -238,27 +207,14 @@ function imgui:_render_pass(cr)
 	self:_backend_set_cursor(self.cursor)
 	self.cursor = false
 
-	--reset the one-shot mouse state vars
-	self.lpressed = false
-	self.rpressed = false
-	self.clicked = false
-	self.rightclick = false
-	self.doubleclicked = false
-	self.tripleclicked = false
-	self.wheel_delta = 0
-
-	--reset the one-shot keyboard state vars
-	self.key = false
-	self.char = false
-
-	--reset the one-shot init trigger
-	self.init = false
-
+	self:_done_frame_layers()
+	self:_done_frame_animation()
+	self:_done_frame_input()
 	self:_done_frame_layout()
+	self:_done_frame_theme()
+	self:_done_frame_cr()
 
-	self.cr = false
-	self.theme = false
-
+	self.init = false
 end
 
 function imgui:_consume_event(clock, event, ...)
@@ -272,13 +228,65 @@ function imgui:_backend_repaint(cr)
 		self:_consume_event(popvar(self.events))
 		repeat
 			self._frame_valid = true
-			self:_render_pass(cr)
+			self:_render_frame(cr)
 		until self._frame_valid
 	until not top(self.events)
 end
 
 function imgui:invalidate()
 	self._frame_valid = false
+end
+
+--graphics context -----------------------------------------------------------
+
+function imgui:_init_cr() end
+
+function imgui:_init_frame_cr(cr)
+	self.cr = cr
+	self.cr:save()
+end
+
+function imgui:_done_frame_cr()
+	self:_backend_load_font(nil)
+	self.cr:restore()
+	self.cr = false
+end
+
+--mouse & keyboard input API -------------------------------------------------
+
+function imgui:_reset_input_state()
+	--mouse one-shot state, set when mouse state changed between frames
+	self.lpressed = false
+	self.rpressed = false
+	self.clicked = false       --left mouse button clicked (one-shot)
+	self.rightclick = false    --right mouse button clicked (one-shot)
+	self.doubleclicked = false --left mouse button double-clicked (one-shot)
+	self.tripleclicked = false --left mouse button triple-clicked (one-shot)
+	self.wheel_delta = 0       --mouse wheel number of scroll pages (one-shot)
+	--keyboard state: to be set on keyboard events
+	self.key = false
+	self.char = false
+	self.shift = false
+	self.ctrl = false
+	self.alt = false
+end
+
+function imgui:_init_input()
+	self:_reset_input_state()
+end
+
+function imgui:_init_frame_input()
+	if self.init then
+		imgui.mousex,
+		imgui.mousey,
+		imgui.lbutton,
+		imgui.rbutton =
+			self:_backend_mouse_state()
+	end
+end
+
+function imgui:_done_frame_input()
+	self:_reset_input_state()
 end
 
 imgui._on = {} --{event->handler}
@@ -335,27 +343,27 @@ function imgui._on:tripleclick(button, x, y)
 end
 
 function imgui._on:mousewheel(delta, x, y)
-	imgui.wheel_delta = imgui.wheel_delta + (delta / 120 or 0)
+	self.wheel_delta = self.wheel_delta + (delta / 120 or 0)
 end
 
 function imgui._on:keydown(key)
-	imgui.key = key
-	imgui.shift = self:_backend_key_state'shift'
-	imgui.ctrl  = self:_backend_key_state'ctrl'
-	imgui.alt   = self:_backend_key_state'alt'
+	self.key = key
+	self.shift = self:_backend_key_state'shift'
+	self.ctrl  = self:_backend_key_state'ctrl'
+	self.alt   = self:_backend_key_state'alt'
 end
 
 function imgui._on:keyup(key)
-	imgui.key = nil
-	imgui.shift = self:_backend_key_state'shift'
-	imgui.ctrl  = self:_backend_key_state'ctrl'
-	imgui.alt   = self:_backend_key_state'alt'
+	self.key = nil
+	self.shift = self:_backend_key_state'shift'
+	self.ctrl  = self:_backend_key_state'ctrl'
+	self.alt   = self:_backend_key_state'alt'
 end
 
 imgui._on.keypress = imgui._on.keydown
 
 function imgui._on:keychar(char)
-	imgui.char = char
+	self.char = char
 end
 
 function imgui:_backend_event(...)
@@ -372,12 +380,14 @@ function imgui:mousepos()
 end
 
 function imgui:hotbox(x, y, w, h)
+	if self.hot_layer and self.hot_layer ~= self.current_layer then
+		return false
+	end
 	local mx, my = self:mousepos()
 	if not mx then return false end
 	return
 		box2d.hit(mx, my, x, y, w, h)
 		and self.cr:in_clip(mx, my)
-		--and self.layers:hit_layer(mx, my, self.current_layer)
 end
 
 function imgui:keypressed(keyname)
@@ -385,6 +395,23 @@ function imgui:keypressed(keyname)
 end
 
 --animation API --------------------------------------------------------------
+
+function imgui:_init_animation()
+	self.stopwatches = {}
+end
+
+function imgui:_init_frame_animation()
+	--remove any finished stopwatches
+	for t in pairs(self.stopwatches) do
+		if t:finished() then
+			self.stopwatches[t] = nil
+		end
+	end
+end
+
+function imgui:_done_frame_animation()
+	--nothing yet
+end
 
 local stopwatch = {}
 
@@ -414,7 +441,6 @@ end
 --themed graphics API --------------------------------------------------------
 
 imgui.themes = {}
-
 imgui.default = {} --theme defaults, declared inline
 
 imgui.themes.dark = glue.inherit({
@@ -454,6 +480,20 @@ imgui.themes.light = glue.inherit({
 }, imgui.default)
 
 imgui.default_theme = imgui.themes.dark
+
+function imgui:_init_theme() end
+
+function imgui:_init_frame_theme()
+	self.theme = self.default_theme
+
+	--clear the background
+	self:setcolor'window_bg'
+	self.cr:paint()
+end
+
+function imgui:_done_frame_theme()
+	self.theme = false
+end
 
 --themed color setting
 
@@ -649,27 +689,43 @@ function imgui:textbox(x, y, w, h, s, font, color, halign, valign, line_spacing)
 	self.cr:restore()
 end
 
---layouting API --------------------------------------------------------------
+--layout API -----------------------------------------------------------------
 
-function imgui:_init_cr()
+function imgui:_init_frame_layout()
+	--init layout state consts
+	local cw, ch = self:_backend_client_size()
+	self.window_cw = cw
+	self.window_ch = ch
 	--init layout state vars
 	self.flow = false --no default: force app to start specific
 	self.halign = 'l'
 	self.valign = 't'
+	self.cx = 0
+	self.cy = 0
 	self.cw = self.window_cw
 	self.ch = self.window_ch
 	self.margin_w = 0
 	self.margin_h = 0
-	--reset context
-	self.cr:reset_clip()
-	self.cr:identity_matrix()
+end
+
+function imgui:_init_layout()
+	self.cr_stack = {}
+	self.bbox_stack = {}
+end
+
+function imgui:_done_frame_layout()
+	assert(not top(self.cr_stack), 'missing end_box()')
+	assert(not top(self.bbox_stack), 'missing end_flowbox()')
 end
 
 function imgui:_save_cr()
-	pushvar(self.layout_stack,
+	pushvar(self.cr_stack,
+		self.cr,
 		self.flow,
 		self.halign,
 		self.valign,
+		self.cx,
+		self.cy,
 		self.cw,
 		self.ch,
 		self.margin_w,
@@ -678,31 +734,31 @@ function imgui:_save_cr()
 end
 
 function imgui:_restore_cr()
+	self.cr,
 	self.flow,
 	self.halign,
 	self.valign,
+	self.cx,
+	self.cy,
 	self.cw,
 	self.ch,
 	self.margin_w,
 	self.margin_h
-		= popvar(self.layout_stack)
+		= popvar(self.cr_stack)
 	self.cr:restore()
 end
 
-function imgui:_done_frame_layout()
-	assert(not top(self.ca_stack), 'missing end_box()')
-	assert(not top(self.bbox_stack), 'missing end_flowbox()')
-	assert(not top(self.layer_stack), 'missing end_layer()')
-end
-
 function imgui:setmargin(mw1, mh1)
-	local mw, mh, cw, ch = self.margin_w, self.margin_h, self.cw, self.ch
+	local mw, mh, cx, cy, cw, ch =
+		self.margin_w, self.margin_h, self.cx, self.cy, self.cw, self.ch
 	mw1 = mw1 or 0
 	mh1 = mh1 or 0
+	cx = cx + mw1 - mw
+	cy = cy + mh1 - mh
 	cw = cw - 2 * (mw1 - mw)
 	ch = ch - 2 * (mh1 - mh)
-	self.margin_w, self.margin_h, self.cw, self.ch = mw1, mh1, cw, ch
-	self.cr:translate(mw1 - mw, mh1 - mh)
+	self.margin_w, self.margin_h, self.cx, self.cy, self.cw, self.ch =
+		mw1, mh1, cx, cy, cw, ch
 end
 
 function imgui:setflow(opt, margin_w, margin_h)
@@ -733,8 +789,8 @@ function imgui:flowbox(w, h)
 	local ch = self.ch
 	w = percent(w, cw) or tonumber(w or cw)
 	h = percent(h, ch) or tonumber(h or ch)
-	if w < 0 then w = cw - w end
-	if h < 0 then h = ch - h end
+	if w < 0 then w = cw + w end
+	if h < 0 then h = ch + h end
 	local x, y
 	if self.halign == 'l' then
 		x = 0
@@ -750,12 +806,12 @@ function imgui:flowbox(w, h)
 	elseif self.valign == 'c' then
 		y = (ch - h) / 2
 	end
-	return x, y, w, h
+	return self.cx + x, self.cy + y, w, h
 end
 
 function imgui:add_flowbox(x, y, w, h)
 
-	--update the bounding box
+	--update the current bounding box
 	local bx, by, bw, bh = topvar(self.bbox_stack)
 	if bx ~= nil then
 		if bx then
@@ -771,13 +827,13 @@ function imgui:add_flowbox(x, y, w, h)
 		local bh = h + self.margin_h
 		self.ch = math.max(0, self.ch - bh)
 		if self.valign ~= 'b' then
-			self.cr:translate(0, h + self.margin_h)
+			self.cy = self.cy + h + self.margin_h
 		end
 	elseif self.flow == 'h' then
 		local bw = w + self.margin_w
 		self.cw = math.max(0, self.cw - bw)
 		if self.halign ~= 'r' then
-			self.cr:translate(w + self.margin_w, 0)
+			self.cx = self.cx + w + self.margin_w
 		end
 	end
 
@@ -791,6 +847,7 @@ end
 
 function imgui:end_flowbox()
 	local bx, by, bw, bh = pop(self.bbox_stack)
+	assert(bx, 'end_flowbox() without begin_flowbox()')
 	self:_restore_cr()
 	self:add_flowbox(bx, by, bw, bh)
 end
@@ -812,31 +869,12 @@ function imgui:box(w, h)
 	self:add_flowbox(x, y, w, h)
 end
 
---[[
-function imgui:begin_floatbox(x, y, w, h)
-	pushvar(self.ca_stack, self.cw, self.ch)
-	self.cr:save()
-	self.cr:identity_matrix()
-	self.cw = self.window_cw
-	self.ch = self.window_ch
-	self.cr:translate(x, y)
-	self.cw = w
-	self.ch = h
-end
-
-function imgui:end_floatbox()
-	local cw, ch = popvar(self.ca_stack)
-	self.cw = cw
-	self.ch = ch
-	self.cr:restore()
-end
-]]
-
 function imgui:begin_box_noclip(w, h, flow, margin_w, margin_h)
-	local x, y, w, h = self:flowbox(w, h)
-	pushvar(self.ca_stack, x, y, w, h)
 	self:_save_cr()
-	self.cr:translate(x, y)
+	local x, y, w, h = self:flowbox(w, h)
+	pushvar(self.cr_stack, x, y, w, h)
+	self.cx = x
+	self.cy = y
 	self.cw = w
 	self.ch = h
 	self:setflow(flow, margin_w, margin_h)
@@ -844,56 +882,85 @@ end
 
 function imgui:begin_box(w, h, flow, margin_w, margin_h)
 	self:begin_box_noclip(w, h, flow, margin_w, margin_h)
-	self.cr:rectangle(0, 0, self.cw, self.ch)
+	self.cr:rectangle(self.cx, self.cy, self.cw, self.ch)
 	self.cr:clip()
 end
 
 function imgui:end_box()
-	local x, y, w, h = popvar(self.ca_stack)
+	local x, y, w, h = popvar(self.cr_stack)
+	assert(x, 'end_box() without begin_box()')
 	self:_restore_cr()
 	self:add_flowbox(x, y, w, h)
 end
 
 --layers API -----------------------------------------------------------------
 
-function imgui:begin_layer(x, y, w, h)
-	self:_save_cr()
-	x, y = self.cr:user_to_device(x, y)
-	push(self.layer_stack, self.cr)
-	local sr = self:_backend_layer_surface()
-	self.cr = sr:context()
-	push(self.layers, sr)
-	self:_init_cr()
-	self.cw = w
-	self.ch = h
-	self.cr:translate(x, y)
+function imgui:_init_layers()
+	self.layers = {}
+	self.hot_layer = false
+	self.current_layer = false
 end
 
-function imgui:end_layer()
-	self:setfont(nil)
-	self.cr:free()
-	self.cr = pop(self.layer_stack)
-	self:_restore_cr()
-end
+function imgui:_init_frame_layers() end
+function imgui:_done_frame_layers() end
 
 function imgui:_render_layers()
-	while true do
-		local sr = pop(self.layers)
-		if not sr then break end
+	assert(self.current_layer == false, 'missing end_layer()')
+
+	for i = 1, topindex(self.layers), 5 do
+		local sr, id, z_order, hit_test_func = unpack(self.layers, i, i + 3)
 		self.cr:identity_matrix()
 		self.cr:source(sr)
 		self.cr:paint()
 		self.cr:rgb(0, 0, 0)
-		sr:free()
+	end
+
+	--hit test layers in reverse paint order to find the new hot one
+	local new_hot_layer = false
+	local mx = self.mousex
+	local my = self.mousey
+	for i = topindex(self.layers) - 4, 1, -5 do
+		local sr, id, z_order, hit_test = unpack(self.layers, i, i + 3)
+		if hit_test then --user-provided function
+			if hit_test(self, mx, my) then
+				new_hot_layer = id
+				break
+			end
+		else --test on sr's bbox
+			local x, y, w, h = sr:ink_extents()
+			if box2d.hit(mx, my, x, y, w, h) then
+				new_hot_layer = id
+				break
+			end
+		end
+	end
+
+	popall(self.layers)
+
+	--check if the active layer has changed, in which case we need
+	--to invalidate the whole frame, because it's like if mouse moved.
+	if new_hot_layer ~= self.hot_layer then
+		self.hot_layer = new_hot_layer
+		self:invalidate()
 	end
 end
 
-function imgui:_free_layers()
-	while true do
-		local sr = popvar(self.layers)
-		if not sr then break end
-		sr:free()
-	end
+function imgui:begin_layer(id, z_order, hit_test_func)
+	self:_save_cr()
+	local sr = self:_backend_layer_surface()
+	local cr = sr:context()
+	pushvar(self.layers, sr, id, z_order, hit_test_func)
+	self:_init_frame_cr(cr)
+	self:_init_frame_layout()
+	self.current_layer = id
+end
+
+function imgui:end_layer()
+	assert(self.current_layer, 'end_layer() without begin_layer()')
+	self.current_layer = top(self.layers, -8) or false
+	self:setfont(nil)
+	self.cr:free()
+	self:_restore_cr()
 end
 
 --label widget ---------------------------------------------------------------
@@ -904,10 +971,9 @@ function imgui:label(s)
 	local ext = self.cr:text_extents(s)
 	local w, h, yb = ext.width, ext.height, ext.y_bearing
 	local x, y, w, h = self:flowbox(w, h)
-	self.cr:move_to(x, -yb)
+	self.cr:move_to(x, y - yb)
 	self.cr:show_text(s)
 	self:add_flowbox(x, y, w, h)
-	return x, y, w, h
 end
 
 --image widget ---------------------------------------------------------------
