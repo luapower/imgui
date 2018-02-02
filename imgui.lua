@@ -1011,7 +1011,6 @@ end
 
 function imgui:_init_frame_layers()
 	self._z_scope.begin = false
-	self._z_scope.level = 0
 	self._z_scope.num = 0
 	self._z_scope.factor = 100
 end
