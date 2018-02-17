@@ -94,7 +94,7 @@ function imgui:button(t)
 		end
 		if state.activate then
 			local bg_color1 = bg_color
-			bg_color = self:fade(state.activate, 0.1, 'normal_bg', 'hot_bg')
+			bg_color = self:fade(state.activate, 0.2, nil, nil, 'normal_bg', 'hot_bg')
 			if not bg_color then
 				state.activate = false
 				bg_color = bg_color1

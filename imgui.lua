@@ -424,9 +424,9 @@ end
 
 imgui.easing = {}
 
-function imgui:animate(start_time, duration, formula, i1, i2)
+function imgui:animate(start_time, duration, formula, dir, i1, i2)
 	if type(formula) == 'number' then
-		formula, i1, i2 = 'linear', formula, i1
+		formula, dir, i1, i2 = 'linear', formula, dir, i1
 	else
 		formula = formula or 'linear'
 		if type(formula) == 'string' then
@@ -436,24 +436,25 @@ function imgui:animate(start_time, duration, formula, i1, i2)
 	assert(formula, 'invalid formula')
 	if self.clock >= start_time + duration then return end
 	self:_backend_invalidate()
-	return easing.ease(formula, self.clock - start_time, i1 or 0, i2 or 1, duration)
+	return easing.ease(formula, dir, self.clock - start_time, duration)
+		* (i2 or 1) + (i1 or 0)
 end
 
 local function sign(x)
 	return x >= 0 and 1 or -1
 end
-function imgui:fade(start_time, duration, formula, color1, color2)
+function imgui:fade(start_time, duration, formula, dir, color1, color2)
 	if not color2 then
-		formula, color1, color2 = 'linear', formula, color1
+		formula, dir, color1, color2 = 'linear', formula, dir, color1
 	end
 	color1 = self.theme[color1] or color1
 	color2 = self.theme[color2] or color2
 	local r1, g1, b1, a1 = assert(color.string_to_rgba(color1))
 	local r2, g2, b2, a2 = assert(color.string_to_rgba(color2))
-	local dr = self:animate(start_time, duration, formula, 0, math.abs(r1 - r2))
-	local dg = self:animate(start_time, duration, formula, 0, math.abs(g1 - g2))
-	local db = self:animate(start_time, duration, formula, 0, math.abs(b1 - b2))
-	local da = self:animate(start_time, duration, formula, 0, math.abs(a1 - a2))
+	local dr = self:animate(start_time, duration, formula, dir, 0, math.abs(r1 - r2))
+	local dg = self:animate(start_time, duration, formula, dir, 0, math.abs(g1 - g2))
+	local db = self:animate(start_time, duration, formula, dir, 0, math.abs(b1 - b2))
+	local da = self:animate(start_time, duration, formula, dir, 0, math.abs(a1 - a2))
 	if not dr then return end
 	local r = r1 + dr * sign(r2 - r1)
 	local g = g1 + dg * sign(g2 - g1)
